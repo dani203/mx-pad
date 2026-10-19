@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=MX Pad
+Comment=Control the Logitech MX Keypad on Linux
+Exec=python3 mxpad_app.py
+Icon=input-keyboard
+Terminal=false
+Type=Application
+Categories=Utility;HardwareSettings;
+StartupNotify=true
+DBusActivatable=false

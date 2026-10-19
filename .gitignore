@@ -1,0 +1,13 @@
+# Logitech Options+ installers and unpacked stubs (proprietary, not our code)
+installers/
+extracted/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# Local runtime
+*.tmp
+.DS_Store
