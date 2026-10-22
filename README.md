@@ -52,3 +52,16 @@ can bind to the focused app (“Adapt to app”), matching Options+ application
 profiles.
 
 The low-level HID demo is still `python3 demo.py`.
+
+## Doom easter egg
+
+On the keypad (not the desktop window), enter the Konami code on the 3×3:
+**up, up, down, down, left, right, left, right, fire, use** — the middle-top,
+middle-bottom, middle-left, middle-right keys, then lower-right and lower-left.
+
+The nine LCDs become a bezeled 3×3 view of Doom. The same keys are the
+controller; **P1** quits, **P2** opens the automap. First launch needs `gcc`,
+`git`, and network once to build [doomgeneric](https://github.com/ozkl/doomgeneric)
+and fetch [Freedoom](https://freedoom.github.io/) into `~/.cache/mxpad/`.
+Drop `doom1.wad` / `doom.wad` in `~/.config/mxpad/` if you already own Doom.
+We do not ship commercial IWADs.

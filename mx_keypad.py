@@ -179,6 +179,7 @@ class MXKeypad:
         self._pressed_grid: set[int] = set()
         self._last_grid_state = 0
         self._pressed_nav: set[int] = set()
+        self.lcd_gap = 0.002
 
     def close(self) -> None:
         if getattr(self, "fd", -1) >= 0:
@@ -212,13 +213,17 @@ class MXKeypad:
     def keepalive(self) -> None:
         self._write(KEEPALIVE)
 
+    def set_lcd_region(self, jpeg: bytes, x: int, y: int, w: int, h: int) -> None:
+        for packet in jpeg_packets(jpeg, x, y, w, h):
+            self._set_feature(packet)
+            if self.lcd_gap:
+                time.sleep(self.lcd_gap)
+
     def set_key_image(self, index: int, jpeg: bytes) -> None:
         if not 0 <= index <= 8:
             raise ValueError("key index must be 0..8")
         x, y = key_origin(index)
-        for packet in jpeg_packets(jpeg, x, y, KEY_SIZE, KEY_SIZE):
-            self._set_feature(packet)
-            time.sleep(0.002)
+        self.set_lcd_region(jpeg, x, y, KEY_SIZE, KEY_SIZE)
 
     def set_key_color(
         self, index: int, color: tuple[int, int, int], label: str | None = None

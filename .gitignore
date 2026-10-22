@@ -11,3 +11,7 @@ __pycache__/
 # Local runtime
 *.tmp
 .DS_Store
+
+# Doom helper build (cloned/built under the user cache, but just in case)
+mxpad-doom
+build-mxpad/

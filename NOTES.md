@@ -46,3 +46,14 @@ Geometry for key `i`: x = 23 + col*(118+40), y = 6 + row*(118+40).
 
 Grid presses arrive as HID++ long (`0x13`) hidIds 1..9, or a short-report quirk
 with the 1..9 id at byte 6. P1/P2 arrive on short report `11 ff 0b 00 01 a1/a2`.
+
+## Doom on the pad
+
+Nine 118×118 JPEGs over Feature report `0x14` (with ~40 px physical gaps) are
+slow enough that the easter egg paints the whole 3×3 as one JPEG on the LCD
+surface (gaps included) so every key presents the same frame. If that blit is
+rejected, it falls back to nine tiles in rotating order — never always
+starting at key 0, which made the upper-left look uniquely smooth. Input is
+the 3×3 itself (cardinals = D-pad, corners = enter/esc/use/fire, center =
+run). The helper is GPL doomgeneric built into `~/.cache/mxpad/`, not linked
+into the Python app.

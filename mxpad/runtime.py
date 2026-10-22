@@ -9,6 +9,7 @@ from gi.repository import GLib
 from mx_keypad import MXKeypad
 from mxpad.actions import ActionRunner
 from mxpad.config import load_config, save_config
+from mxpad.doom import KONAMI, DoomError, DoomSession
 from mxpad.focus import focused_app_name, profile_matches
 from mxpad.render import render_key
 from mxpad.status import StatusCollector, apply_status
@@ -35,6 +36,8 @@ class PadRuntime:
         self._paint_source: int | None = None
         self.collector = StatusCollector()
         self._live_sigs: list[str] = [""] * 9
+        self._konami: list[int] = []
+        self._doom: DoomSession | None = None
 
     def start(self) -> None:
         self._stop.clear()
@@ -43,6 +46,7 @@ class PadRuntime:
 
     def stop(self) -> None:
         self._stop.set()
+        self._stop_doom()
         if self._thread:
             self._thread.join(timeout=2)
         with self._lock:
@@ -211,7 +215,18 @@ class PadRuntime:
                 except Exception:
                     pass
                 last_adapt = now
-            if now - last_live > 1.0:
+            if self._doom:
+                try:
+                    with self._lock:
+                        pad = self.pad
+                        alive = self._doom.pump(pad) if pad else False
+                    if not alive:
+                        self._stop_doom()
+                        self._paint_current(force=True)
+                except Exception as exc:
+                    GLib.idle_add(lambda e=str(exc): self.on_status(f"Doom: {e}") or False)
+                    self._stop_doom()
+            elif now - last_live > 1.0:
                 try:
                     self._paint_current()
                 except Exception:
@@ -219,26 +234,41 @@ class PadRuntime:
                 last_live = now
             try:
                 with self._lock:
-                    events = self.pad.read_events(0.15) if self.pad else []
+                    timeout = 0.02 if self._doom else 0.15
+                    events = self.pad.read_events(timeout) if self.pad else []
             except OSError:
                 self._disconnect("Keypad disconnected")
                 continue
             for event in events:
-                if not event.pressed:
-                    continue
-                GLib.idle_add(lambda e=event: self.on_event(f"{e.key} pressed") or False)
+                if event.pressed:
+                    GLib.idle_add(lambda e=event: self.on_event(f"{e.key} pressed") or False)
                 try:
                     self._dispatch(event)
                 except Exception as exc:
                     GLib.idle_add(lambda e=str(exc): self.on_status(f"Action failed: {e}") or False)
 
     def _dispatch(self, event: Any) -> None:
-        profile = self.current_profile()
+        if self._doom:
+            if event.key == "P1" and event.pressed:
+                self._stop_doom()
+                self._paint_current(force=True)
+                return
+            self._doom.handle_event(event)
+            return
         if event.key in ("P1", "P2"):
+            if not event.pressed:
+                return
+            profile = self.current_profile()
             action = (profile.get("nav") or {}).get(event.key) or {"type": "page", "which": "next"}
             self.runner.run(action)
             return
-        if event.index is None:
+        if not event.pressed or event.index is None:
+            return
+        self._konami.append(event.index)
+        self._konami = self._konami[-len(KONAMI) :]
+        if tuple(self._konami) == KONAMI:
+            self._konami.clear()
+            self._start_doom()
             return
         page = self.current_page()
         keys = page.get("keys") or []
@@ -246,3 +276,25 @@ class PadRuntime:
             return
         action = keys[event.index].get("action") or {"type": "none"}
         self.runner.run(action)
+
+    def _start_doom(self) -> None:
+        if self._doom:
+            return
+        GLib.idle_add(lambda: self.on_status("Summoning Doom…") or False)
+        session = DoomSession(
+            on_status=lambda s: GLib.idle_add(lambda m=s: self.on_status(m) or False)
+        )
+        try:
+            session.start()
+        except (DoomError, OSError) as exc:
+            GLib.idle_add(lambda e=str(exc): self.on_status(f"Doom unavailable: {e}") or False)
+            session.stop()
+            return
+        self._doom = session
+
+    def _stop_doom(self) -> None:
+        session = self._doom
+        self._doom = None
+        if session:
+            session.stop()
+            GLib.idle_add(lambda: self.on_status("Back from Hell") or False)
