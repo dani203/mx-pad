@@ -21,7 +21,7 @@ class ActionRunner:
         self.keyboard = keyboard or VirtualKeyboard()
         self._page_handler: Callable[[str, int | None], None] | None = None
 
-    def set_page_handler(self, handler: Callable[[str, int | None], None]) -> None:
+    def set_page_handler(self, handler: Callable[..., None]) -> None:
         self._page_handler = handler
 
     def run(self, action: dict[str, Any]) -> None:
@@ -256,7 +256,15 @@ class ActionRunner:
         if self._page_handler:
             which = str(action.get("which") or "next")
             index = action.get("index")
-            self._page_handler(which, index)
+            page_id = action.get("page_id")
+            self._page_handler(which, index, page_id)
+
+    def _do_submenu(self, action: dict[str, Any]) -> None:
+        # Opened by PadRuntime from the key's submenu payload.
+        return
+
+    def _do_back(self, action: dict[str, Any]) -> None:
+        return
 
     def _do_sequence(self, action: dict[str, Any]) -> None:
         import time

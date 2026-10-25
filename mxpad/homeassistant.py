@@ -27,29 +27,124 @@ from mxpad.config import CONFIG_DIR, ensure_dirs
 
 CREDENTIALS_PATH = CONFIG_DIR / "homeassistant.json"
 
-SWITCHABLE = (
-    "light",
-    "switch",
-    "fan",
-    "cover",
-    "lock",
-    "scene",
-    "script",
-    "automation",
-    "input_boolean",
-    "input_button",
-    "button",
-    "media_player",
-    "climate",
-    "vacuum",
-    "siren",
-    "humidifier",
-    "remote",
-    "alarm_control_panel",
-    "valve",
-    "water_heater",
-    "lawn_mower",
+BRIGHTNESS_STEP_PCT = 15
+COLOR_TEMP_STEP_K = 300
+CLIMATE_TEMP_STEP = 1.0
+
+# Per-domain keypad actions. Synthetic ids (brightness_up, …) expand to turn_on/set_* with data.
+DOMAIN_SERVICES: dict[str, list[tuple[str, str]]] = {
+    "light": [
+        ("toggle", "Toggle"),
+        ("turn_on", "Turn on"),
+        ("turn_off", "Turn off"),
+        ("brightness_up", "Brightness up"),
+        ("brightness_down", "Brightness down"),
+        ("color_temp_warmer", "Warmer"),
+        ("color_temp_cooler", "Cooler"),
+    ],
+    "switch": [("toggle", "Toggle"), ("turn_on", "Turn on"), ("turn_off", "Turn off")],
+    "fan": [
+        ("toggle", "Toggle"),
+        ("turn_on", "Turn on"),
+        ("turn_off", "Turn off"),
+        ("increase_speed", "Speed up"),
+        ("decrease_speed", "Speed down"),
+    ],
+    "cover": [
+        ("toggle", "Toggle"),
+        ("open_cover", "Open"),
+        ("close_cover", "Close"),
+        ("stop_cover", "Stop"),
+        ("open_cover_tilt", "Tilt open"),
+        ("close_cover_tilt", "Tilt close"),
+    ],
+    "lock": [("lock", "Lock"), ("unlock", "Unlock"), ("open", "Open")],
+    "scene": [("turn_on", "Activate")],
+    "script": [("turn_on", "Run"), ("turn_off", "Stop"), ("toggle", "Toggle")],
+    "automation": [
+        ("trigger", "Trigger"),
+        ("toggle", "Toggle"),
+        ("turn_on", "Enable"),
+        ("turn_off", "Disable"),
+    ],
+    "input_boolean": [("toggle", "Toggle"), ("turn_on", "Turn on"), ("turn_off", "Turn off")],
+    "input_button": [("press", "Press")],
+    "button": [("press", "Press")],
+    "media_player": [
+        ("media_play_pause", "Play / pause"),
+        ("media_play", "Play"),
+        ("media_pause", "Pause"),
+        ("media_stop", "Stop"),
+        ("media_next_track", "Next"),
+        ("media_previous_track", "Previous"),
+        ("volume_up", "Volume up"),
+        ("volume_down", "Volume down"),
+        ("volume_mute", "Mute"),
+        ("toggle", "Toggle power"),
+        ("turn_on", "Turn on"),
+        ("turn_off", "Turn off"),
+    ],
+    "climate": [
+        ("turn_on", "Turn on"),
+        ("turn_off", "Turn off"),
+        ("temperature_up", "Temperature up"),
+        ("temperature_down", "Temperature down"),
+    ],
+    "vacuum": [
+        ("start", "Start"),
+        ("pause", "Pause"),
+        ("stop", "Stop"),
+        ("return_to_base", "Dock"),
+        ("locate", "Locate"),
+        ("clean_spot", "Spot clean"),
+    ],
+    "siren": [("toggle", "Toggle"), ("turn_on", "Turn on"), ("turn_off", "Turn off")],
+    "humidifier": [("toggle", "Toggle"), ("turn_on", "Turn on"), ("turn_off", "Turn off")],
+    "remote": [("toggle", "Toggle"), ("turn_on", "Turn on"), ("turn_off", "Turn off")],
+    "alarm_control_panel": [
+        ("alarm_disarm", "Disarm"),
+        ("alarm_arm_home", "Arm home"),
+        ("alarm_arm_away", "Arm away"),
+        ("alarm_arm_night", "Arm night"),
+    ],
+    "valve": [
+        ("toggle", "Toggle"),
+        ("open_valve", "Open"),
+        ("close_valve", "Close"),
+        ("stop_valve", "Stop"),
+    ],
+    "water_heater": [("turn_on", "Turn on"), ("turn_off", "Turn off")],
+    "lawn_mower": [("start_mowing", "Start"), ("pause", "Pause"), ("dock", "Dock")],
+    "timer": [
+        ("start", "Start"),
+        ("pause", "Pause"),
+        ("cancel", "Cancel"),
+        ("finish", "Finish"),
+    ],
+    "counter": [("increment", "Increment"), ("decrement", "Decrement"), ("reset", "Reset")],
+    "camera": [
+        ("enable_motion_detection", "Motion on"),
+        ("disable_motion_detection", "Motion off"),
+    ],
+    "input_number": [("increment", "Increment"), ("decrement", "Decrement")],
+    "number": [("increment", "Increment"), ("decrement", "Decrement")],
+}
+
+# Keypad action ids that are not HA service names (resolved in build_service_call).
+SYNTHETIC_SERVICES = frozenset(
+    {
+        "brightness_up",
+        "brightness_down",
+        "color_temp_warmer",
+        "color_temp_cooler",
+        "temperature_up",
+        "temperature_down",
+        "increment",
+        "decrement",
+    }
 )
+
+SWITCHABLE = tuple(DOMAIN_SERVICES.keys())
 
 STATUS_SKIP = (
     "persistent_notification",
@@ -93,10 +188,17 @@ DOMAIN_ICONS = {
     "input_select": "form-select",
     "select": "form-select",
     "water_heater": "water-boiler",
+    "timer": "timer-outline",
+    "counter": "counter",
+    "camera": "cctv",
+    "lawn_mower": "robot-mower",
+    "input_number": "numeric",
+    "number": "numeric",
 }
 
 HA_STATUS_PREFIX = "ha:"
 
+# Fallback labels when no entity is selected yet.
 HA_SERVICES = [
     ("toggle", "Toggle"),
     ("turn_on", "Turn on"),
@@ -140,6 +242,18 @@ class Entity:
     hs: tuple[float, float] | None = None
     kelvin: int | None = None
     brightness: int | None = None
+    color_modes: tuple[str, ...] = ()
+    min_kelvin: int | None = None
+    max_kelvin: int | None = None
+    temperature: float | None = None
+    min_temp: float | None = None
+    max_temp: float | None = None
+    target_temp_step: float | None = None
+    number_value: float | None = None
+    number_min: float | None = None
+    number_max: float | None = None
+    number_step: float | None = None
+    supported_features: int = 0
 
     @property
     def icon(self) -> str:
@@ -148,6 +262,29 @@ class Entity:
     @property
     def status_key(self) -> str:
         return f"{HA_STATUS_PREFIX}{self.entity_id}"
+
+    @property
+    def supports_brightness(self) -> bool:
+        modes = {str(m) for m in self.color_modes}
+        if modes == {"onoff"}:
+            return False
+        if self.brightness is not None:
+            return True
+        bright_modes = {"brightness", "color_temp", "hs", "xy", "rgb", "rgbw", "rgbww", "white"}
+        if modes & bright_modes:
+            return True
+        return not modes
+
+    @property
+    def supports_color_temp(self) -> bool:
+        if self.kelvin is not None:
+            return True
+        return "color_temp" in {str(m) for m in self.color_modes}
+
+    @property
+    def supports_tilt(self) -> bool:
+        # cover.SUPPORT_OPEN_TILT = 16, CLOSE_TILT = 32 (legacy bitflags)
+        return bool(self.supported_features & (16 | 32))
 
     def status_text(self, width: int = 10) -> str:
         state = (self.state or "").strip()
@@ -571,54 +708,201 @@ def entity_from_state(item: dict[str, Any] | None) -> Entity | None:
         return None
     domain = entity_id.split(".", 1)[0]
     attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+    modes = attrs.get("supported_color_modes") or attrs.get("color_modes") or []
+    if not isinstance(modes, (list, tuple)):
+        modes = []
+    state = str(item.get("state") or "")
+    number_value = _float_or_none(state) if domain in ("number", "input_number") else None
     return Entity(
         entity_id,
         str(attrs.get("friendly_name") or entity_id),
         domain,
-        str(item.get("state") or ""),
+        state,
         str(attrs.get("unit_of_measurement") or ""),
         rgb=_int_triple(attrs.get("rgb_color")),
         hs=_float_pair(attrs.get("hs_color")),
         kelvin=_kelvin(attrs),
         brightness=_int_or_none(attrs.get("brightness")),
+        color_modes=tuple(str(m) for m in modes),
+        min_kelvin=_int_or_none(attrs.get("min_color_temp_kelvin")),
+        max_kelvin=_int_or_none(attrs.get("max_color_temp_kelvin")),
+        temperature=_float_or_none(attrs.get("temperature")),
+        min_temp=_float_or_none(attrs.get("min_temp")),
+        max_temp=_float_or_none(attrs.get("max_temp")),
+        target_temp_step=_float_or_none(attrs.get("target_temp_step")),
+        number_value=number_value,
+        number_min=_float_or_none(attrs.get("min")),
+        number_max=_float_or_none(attrs.get("max")),
+        number_step=_float_or_none(attrs.get("step")),
+        supported_features=_int_or_none(attrs.get("supported_features")) or 0,
     )
+
+
+def services_for_domain(domain: str) -> list[tuple[str, str]]:
+    return list(DOMAIN_SERVICES.get(domain or "", ()))
+
+
+def _lookup_entity(entity_id: str) -> Entity | None:
+    try:
+        from mxpad.ha_stream import hub
+
+        return hub.get_entity(entity_id)
+    except Exception:
+        return None
+
+
+def services_for_entity(entity_id: str) -> list[tuple[str, str]]:
+    entity_id = (entity_id or "").strip()
+    if "." not in entity_id:
+        return []
+    domain = entity_id.split(".", 1)[0]
+    options = services_for_domain(domain)
+    ent = _lookup_entity(entity_id)
+    if ent is None:
+        return options
+    skip: set[str] = set()
+    if domain == "light":
+        if not ent.supports_brightness:
+            skip.update({"brightness_up", "brightness_down"})
+        if not ent.supports_color_temp:
+            skip.update({"color_temp_warmer", "color_temp_cooler"})
+    elif domain == "cover" and ent.supported_features and not ent.supports_tilt:
+        skip.update({"open_cover_tilt", "close_cover_tilt"})
+    elif domain == "climate" and ent.temperature is None and ent.min_temp is None:
+        skip.update({"temperature_up", "temperature_down"})
+    if not skip:
+        return options
+    return [(svc, label) for svc, label in options if svc not in skip]
+
+
+def default_service(entity_id: str) -> str:
+    options = services_for_entity(entity_id)
+    if not options:
+        return "toggle"
+    preferred = (
+        "toggle",
+        "press",
+        "media_play_pause",
+        "start",
+        "start_mowing",
+        "trigger",
+        "lock",
+        "open_cover",
+        "turn_on",
+        "alarm_disarm",
+        "increment",
+    )
+    ids = {svc for svc, _label in options}
+    for name in preferred:
+        if name in ids:
+            return name
+    return options[0][0]
 
 
 def _service_for(entity_id: str, service: str) -> tuple[str, str]:
     domain = entity_id.split(".", 1)[0]
-    wanted = (service or "toggle").strip()
-    if domain in ("scene", "script"):
-        return domain, "turn_on"
-    if domain in ("button", "input_button"):
-        return domain, "press"
-    if domain == "lock":
-        if wanted == "turn_on":
-            return "lock", "lock"
-        if wanted == "turn_off":
-            return "lock", "unlock"
-        return "homeassistant", "toggle"
-    if domain == "cover":
-        if wanted == "turn_on":
-            return "cover", "open_cover"
-        if wanted == "turn_off":
-            return "cover", "close_cover"
-        return "cover", "toggle"
-    if wanted == "toggle":
+    wanted = (service or "").strip()
+    allowed = {svc for svc, _label in services_for_domain(domain)}
+
+    # Older builds only offered toggle / turn_on / turn_off for every entity.
+    legacy = {
+        ("lock", "toggle"): ("homeassistant", "toggle"),
+        ("lock", "turn_on"): ("lock", "lock"),
+        ("lock", "turn_off"): ("lock", "unlock"),
+        ("cover", "turn_on"): ("cover", "open_cover"),
+        ("cover", "turn_off"): ("cover", "close_cover"),
+        ("valve", "turn_on"): ("valve", "open_valve"),
+        ("valve", "turn_off"): ("valve", "close_valve"),
+        ("vacuum", "turn_on"): ("vacuum", "start"),
+        ("vacuum", "turn_off"): ("vacuum", "return_to_base"),
+        ("timer", "turn_on"): ("timer", "start"),
+        ("timer", "turn_off"): ("timer", "cancel"),
+        ("timer", "toggle"): ("timer", "start"),
+        ("lawn_mower", "turn_on"): ("lawn_mower", "start_mowing"),
+        ("lawn_mower", "turn_off"): ("lawn_mower", "dock"),
+        ("button", "toggle"): ("button", "press"),
+        ("button", "turn_on"): ("button", "press"),
+        ("input_button", "toggle"): ("input_button", "press"),
+        ("input_button", "turn_on"): ("input_button", "press"),
+        ("scene", "toggle"): ("scene", "turn_on"),
+        ("media_player", "toggle"): ("media_player", "media_play_pause"),
+    }
+    if (domain, wanted) in legacy:
+        return legacy[(domain, wanted)]
+
+    if wanted in SYNTHETIC_SERVICES:
+        return domain, wanted
+
+    if not wanted or (allowed and wanted not in allowed):
+        wanted = default_service(entity_id)
+        allowed = {svc for svc, _label in services_for_domain(domain)}
+
+    if wanted == "toggle" and "toggle" not in allowed:
         return "homeassistant", "toggle"
     return domain, wanted
+
+
+def build_service_call(entity_id: str, service: str) -> tuple[str, str, dict[str, Any]]:
+    """Resolve keypad service id → HA domain, service name, and service_data."""
+    domain, wanted = _service_for(entity_id, service)
+    data: dict[str, Any] = {"entity_id": entity_id}
+    ent = _lookup_entity(entity_id)
+
+    if wanted == "brightness_up":
+        data["brightness_step_pct"] = BRIGHTNESS_STEP_PCT
+        return "light", "turn_on", data
+    if wanted == "brightness_down":
+        data["brightness_step_pct"] = -BRIGHTNESS_STEP_PCT
+        return "light", "turn_on", data
+    if wanted == "color_temp_warmer":
+        kelvin = (ent.kelvin if ent and ent.kelvin else 3000) - COLOR_TEMP_STEP_K
+        lo = (ent.min_kelvin if ent and ent.min_kelvin else 2000)
+        data["color_temp_kelvin"] = max(lo, kelvin)
+        return "light", "turn_on", data
+    if wanted == "color_temp_cooler":
+        kelvin = (ent.kelvin if ent and ent.kelvin else 4000) + COLOR_TEMP_STEP_K
+        hi = (ent.max_kelvin if ent and ent.max_kelvin else 6500)
+        data["color_temp_kelvin"] = min(hi, kelvin)
+        return "light", "turn_on", data
+    if wanted in ("temperature_up", "temperature_down"):
+        step = (ent.target_temp_step if ent and ent.target_temp_step else CLIMATE_TEMP_STEP)
+        current = ent.temperature if ent and ent.temperature is not None else 20.0
+        delta = step if wanted == "temperature_up" else -step
+        target = current + delta
+        if ent and ent.min_temp is not None:
+            target = max(ent.min_temp, target)
+        if ent and ent.max_temp is not None:
+            target = min(ent.max_temp, target)
+        data["temperature"] = round(target, 1)
+        return "climate", "set_temperature", data
+    if domain in ("number", "input_number") and wanted in ("increment", "decrement"):
+        step = (ent.number_step if ent and ent.number_step else 1.0)
+        current = ent.number_value if ent and ent.number_value is not None else 0.0
+        target = current + step if wanted == "increment" else current - step
+        if ent and ent.number_min is not None:
+            target = max(ent.number_min, target)
+        if ent and ent.number_max is not None:
+            target = min(ent.number_max, target)
+        data["value"] = target
+        return domain, "set_value", data
+
+    if wanted == "toggle" and "toggle" not in {s for s, _ in services_for_domain(domain)}:
+        return "homeassistant", "toggle", data
+    return domain, wanted, data
 
 
 def call_entity(entity_id: str, service: str = "toggle") -> None:
     entity_id = (entity_id or "").strip()
     if not entity_id or "." not in entity_id:
         raise HomeAssistantError("No Home Assistant entity selected")
-    domain, svc = _service_for(entity_id, service)
+    domain, svc, data = build_service_call(entity_id, service)
     from mxpad.ha_stream import hub
 
     hub.ensure()
-    if hub.call_service(domain, svc, entity_id):
+    hub.apply_optimistic(entity_id, service, data)
+    if hub.call_service(domain, svc, data):
         return
-    request("POST", f"/api/services/{domain}/{svc}", {"entity_id": entity_id})
+    request("POST", f"/api/services/{domain}/{svc}", data)
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -626,6 +910,15 @@ def _int_or_none(value: Any) -> int | None:
         if value is None or value == "":
             return None
         return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
     except (TypeError, ValueError):
         return None
 

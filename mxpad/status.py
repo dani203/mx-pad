@@ -47,7 +47,8 @@ def apply_status(key: dict, snapshot: dict[str, Reading]) -> dict:
         return key
     painted = dict(key)
     painted["label"] = reading.text
-    if reading.icon:
+    # Keep a user-picked MDI icon; only fill in the metric/HA default when unset.
+    if reading.icon and not key.get("icon"):
         painted["icon"] = reading.icon
     if key.get("status_color"):
         if reading.color:
