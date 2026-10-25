@@ -82,6 +82,7 @@ def default_config() -> dict[str, Any]:
     }
     return {
         "adapt_to_app": True,
+        "page_animation": True,
         "active_profile": "general",
         "profiles": [general],
     }

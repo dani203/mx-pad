@@ -30,7 +30,21 @@ update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
 Needs Python 3, GTK 4, libadwaita, PyGObject, Pillow (`python3-gobject`,
 `python3-pillow`, `libadwaita` on Fedora).
 
-Config lives in `~/.config/mxpad/config.json`.
+Config lives in `~/.config/mxpad/config.json`. Home Assistant URL and token
+are stored separately in `~/.config/mxpad/homeassistant.json` (mode 0600).
+
+## Home Assistant
+
+Toolbar **Home Assistant**: discover `_home-assistant._tcp` on the LAN (Avahi)
+or paste a URL such as `http://homeassistant.local:8123`. **Sign in with Home
+Assistant** opens your browser on HA’s own login (OAuth). A long-lived access
+token (HA profile → Security) still works as a fallback. Then set a key’s
+action to Home Assistant and pick an entity (lights, switches, covers, scenes,
+…). Pressing the key calls `toggle` / `turn_on` / `turn_off` on that entity.
+**Live status → Home Assistant** paints a sensor, light, or other entity’s
+current state on the LCD (Home Assistant websocket, no REST polling). **Color from status**
+tints the key from on/off, RGB, and color temperature when the entity is a
+light or switch.
 
 ## What you can assign to a key
 
@@ -44,6 +58,7 @@ Config lives in `~/.config/mxpad/config.json`.
 | Media playback | Play, next, mute, volume |
 | System / settings | Screenshot, lock, night light, brightness, desktop |
 | Go to page | Navigate to page |
+| Home Assistant | Toggle lights, switches, scenes, and other entities |
 | P1 / P2 | Page previous / next (click P1/P2 in the UI to flip) |
 | MDI icon | Material Design Icons on the LCD (Browse in the key editor) |
 

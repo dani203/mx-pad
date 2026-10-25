@@ -247,6 +247,11 @@ class ActionRunner:
         except Exception:
             _run(["gsettings", "set", schema, key, "toggle"])
 
+    def _do_homeassistant(self, action: dict[str, Any]) -> None:
+        from mxpad.homeassistant import call_entity
+
+        call_entity(str(action.get("entity_id") or ""), str(action.get("service") or "toggle"))
+
     def _do_page(self, action: dict[str, Any]) -> None:
         if self._page_handler:
             which = str(action.get("which") or "next")
