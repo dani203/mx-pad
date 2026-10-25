@@ -13,7 +13,15 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango
 
 from mxpad.actions import list_applications
-from mxpad.config import duplicate_profile, empty_key, empty_page, import_image, new_profile
+from mxpad.config import (
+    duplicate_key,
+    duplicate_profile,
+    empty_key,
+    empty_page,
+    ensure_submenu,
+    import_image,
+    new_profile,
+)
 from mxpad.homeassistant import (
     COLOR_DOMAINS,
     HA_SERVICES,
@@ -22,12 +30,14 @@ from mxpad.homeassistant import (
     HomeAssistantError,
     authorize_in_browser,
     clear_credentials,
+    default_service,
     discover_instances,
     is_configured,
     list_entities,
     load_credentials,
     ping,
     save_credentials,
+    services_for_entity,
 )
 from mxpad.mdi import render_icon, search as search_mdi
 from mxpad.runtime import PadRuntime
@@ -42,7 +52,9 @@ ACTION_TYPES = [
     ("command", "Run command"),
     ("media", "Media playback"),
     ("system", "System / settings"),
-    ("page", "Go to page"),
+    ("page", "Switch to page"),
+    ("submenu", "Submenu"),
+    ("back", "Back (close submenu)"),
     ("homeassistant", "Home Assistant"),
 ]
 
@@ -67,7 +79,7 @@ SYSTEM_COMMANDS = [
     ("logout", "Log out"),
 ]
 
-PAGE_WHICH = [("prev", "Previous page"), ("next", "Next page"), ("goto", "Specific page")]
+PAGE_WHICH = [("prev", "Previous page"), ("next", "Next page"), ("goto", "Switch to page")]
 
 CSS = """
 .key-tile {
@@ -81,8 +93,12 @@ CSS = """
   border-color: @accent_color;
 }
 .mdi-browser {
-  min-width: 72px;
-  min-height: 72px;
+  min-width: 112px;
+  min-height: 112px;
+  padding: 10px;
+}
+.mdi-browser image {
+  -gtk-icon-size: 64px;
 }
 .pad-grid {
   margin: 12px;
@@ -118,7 +134,7 @@ def _pixbuf(name: str, size: int = 48, color=(255, 255, 255)) -> GdkPixbuf.Pixbu
 class IconChooser(Adw.Window):
     def __init__(self, parent: Gtk.Window, callback) -> None:
         super().__init__(transient_for=parent, modal=True, title="Material Design Icons")
-        self.set_default_size(560, 620)
+        self.set_default_size(720, 680)
         self._callback = callback
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_top(12)
@@ -129,14 +145,17 @@ class IconChooser(Adw.Window):
         search.set_placeholder_text("Search 7,000+ MDI icons…")
         search.connect("search-changed", self._filter)
         self._flow = Gtk.FlowBox()
-        self._flow.set_max_children_per_line(8)
+        self._flow.set_max_children_per_line(5)
+        self._flow.set_min_children_per_line(3)
         self._flow.set_selection_mode(Gtk.SelectionMode.NONE)
         self._flow.set_homogeneous(True)
+        self._flow.set_column_spacing(8)
+        self._flow.set_row_spacing(8)
         scroller = Gtk.ScrolledWindow(vexpand=True)
         scroller.set_child(self._flow)
         box.append(search)
         box.append(scroller)
-        self.set_content(box)
+        _modal_shell(self, "Material Design Icons", box, "Cancel")
         self._rebuild("")
         search.grab_focus()
 
@@ -148,13 +167,16 @@ class IconChooser(Adw.Window):
             btn = Gtk.Button()
             btn.add_css_class("mdi-browser")
             btn.set_tooltip_text(name)
-            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
             inner.set_halign(Gtk.Align.CENTER)
-            pix = _pixbuf(name, 36)
+            pix = _pixbuf(name, 72)
             if pix:
-                inner.append(Gtk.Image.new_from_pixbuf(pix))
+                image = Gtk.Image.new_from_pixbuf(pix)
+                image.set_pixel_size(72)
+                inner.append(image)
             lbl = Gtk.Label(label=name)
             lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            lbl.set_max_width_chars(14)
             lbl.add_css_class("caption")
             inner.append(lbl)
             btn.set_child(inner)
@@ -448,7 +470,9 @@ class EntityChooser(Adw.Window):
         box.set_margin_end(12)
         search = Gtk.SearchEntry()
         search.set_placeholder_text(
-            "Search sensors, lights, switches…" if kind == "status" else "Search lights, switches, scenes…"
+            "Search sensors, lights, switches…"
+            if kind == "status"
+            else "Search lights, locks, timers, printers…"
         )
         search.connect("search-changed", self._filter)
         self._list = Gtk.ListBox()
@@ -484,7 +508,8 @@ class EntityChooser(Adw.Window):
 
     def _ready(self, entities: list[Entity]) -> bool:
         self._entities = entities
-        self._hint.set_text(f"{len(entities)} controllable entities")
+        label = "status entities" if self._kind == "status" else "actionable entities"
+        self._hint.set_text(f"{len(entities)} {label}")
         self._rebuild("")
         return False
 
@@ -517,6 +542,7 @@ class MxPadWindow(Adw.ApplicationWindow):
         self.set_default_size(1080, 720)
         self._selected = 0
         self._suspend = False
+        self._edit_stack: list[dict[str, Any]] = []
         self.runtime = PadRuntime(on_status=self._on_status, on_event=self._on_event)
         self._build()
         self.runtime.start()
@@ -590,6 +616,16 @@ class MxPadWindow(Adw.ApplicationWindow):
         box.set_margin_end(12)
         self._page_bar = Gtk.Box(spacing=6)
         box.append(self._page_bar)
+        self._crumb_bar = Gtk.Box(spacing=6)
+        self._crumb_bar.set_visible(False)
+        self._crumb_label = Gtk.Label(xalign=0)
+        self._crumb_label.add_css_class("dim-label")
+        self._crumb_label.set_hexpand(True)
+        crumb_done = Gtk.Button(label="Done")
+        crumb_done.connect("clicked", self._edit_submenu_done)
+        self._crumb_bar.append(self._crumb_label)
+        self._crumb_bar.append(crumb_done)
+        box.append(self._crumb_bar)
         self._grid = Gtk.Grid(column_spacing=8, row_spacing=8)
         self._grid.add_css_class("pad-grid")
         self._grid.set_halign(Gtk.Align.CENTER)
@@ -632,6 +668,15 @@ class MxPadWindow(Adw.ApplicationWindow):
         self._label_row = Adw.EntryRow(title="Label")
         self._label_row.connect("changed", self._label_changed)
         grp.add(self._label_row)
+
+        dup_row = Adw.ActionRow(
+            title="Duplicate",
+            subtitle="Copy this key onto another slot on this page",
+        )
+        dup_btn = Gtk.Button(label="Duplicate to…")
+        dup_btn.connect("clicked", self._duplicate_key)
+        dup_row.add_suffix(dup_btn)
+        grp.add(dup_row)
 
         color_row = Adw.ActionRow(title="Background color")
         self._color_btn = Gtk.ColorDialogButton()
@@ -693,6 +738,18 @@ class MxPadWindow(Adw.ApplicationWindow):
         self._status_color_row.connect("notify::active", self._status_color_changed)
         grp.add(self._status_color_row)
 
+        self._hold_enable = Adw.SwitchRow(
+            title="Hold action",
+            subtitle="Long-press (~0.45s) runs a second action",
+        )
+        self._hold_enable.connect("notify::active", self._hold_enable_changed)
+        grp.add(self._hold_enable)
+
+        self._action_slot = Adw.ComboRow(title="Editing")
+        self._action_slot.set_model(Gtk.StringList.new(["Tap action", "Hold action"]))
+        self._action_slot.connect("notify::selected", self._action_slot_changed)
+        grp.add(self._action_slot)
+
         self._type_row = Adw.ComboRow(title="Action")
         store = Gtk.StringList.new([label for _id, label in ACTION_TYPES])
         self._type_row.set_model(store)
@@ -746,6 +803,19 @@ class MxPadWindow(Adw.ApplicationWindow):
         self._page_row.connect("notify::selected", self._page_action_changed)
         grp.add(self._page_row)
 
+        self._page_target_row = Adw.ComboRow(title="Target page")
+        self._page_target_row.connect("notify::selected", self._page_target_changed)
+        grp.add(self._page_target_row)
+
+        self._submenu_row = Adw.ActionRow(
+            title="Submenu keys",
+            subtitle="Edit the nine keys shown when this submenu opens",
+        )
+        sub_btn = Gtk.Button(label="Edit…")
+        sub_btn.connect("clicked", self._edit_submenu)
+        self._submenu_row.add_suffix(sub_btn)
+        grp.add(self._submenu_row)
+
         self._ha_row = Adw.ActionRow(title="Home Assistant entity")
         self._ha_label = Gtk.Label()
         self._ha_label.add_css_class("dim-label")
@@ -771,13 +841,61 @@ class MxPadWindow(Adw.ApplicationWindow):
             self._media_row,
             self._system_row,
             self._page_row,
+            self._page_target_row,
+            self._submenu_row,
             self._ha_row,
             self._ha_service_row,
         ]
         return grp
 
+    def _editing_keys(self) -> list[dict[str, Any]]:
+        if self._edit_stack:
+            return self._edit_stack[-1]["keys"]
+        page = self.runtime.current_page()
+        keys = page.setdefault("keys", [])
+        while len(keys) < 9:
+            keys.append(empty_key(len(keys)))
+        return keys
+
     def _key(self) -> dict[str, Any]:
-        return self.runtime.current_page()["keys"][self._selected]
+        keys = self._editing_keys()
+        if self._selected >= len(keys):
+            self._selected = 0
+        return keys[self._selected]
+
+    def _editing_hold(self) -> bool:
+        return bool(self._hold_enable.get_active() and self._action_slot.get_selected() == 1)
+
+    def _action_dict(self) -> dict[str, Any]:
+        key = self._key()
+        if self._editing_hold():
+            hold = key.get("hold_action")
+            if not isinstance(hold, dict):
+                hold = {"type": "none"}
+                key["hold_action"] = hold
+            return hold
+        action = key.get("action")
+        if not isinstance(action, dict):
+            action = {"type": "none"}
+            key["action"] = action
+        return action
+
+    def _set_action(self, action: dict[str, Any]) -> None:
+        key = self._key()
+        if self._editing_hold():
+            key["hold_action"] = action
+        else:
+            key["action"] = action
+
+    def _refresh_crumb(self) -> None:
+        if not self._edit_stack:
+            self._crumb_bar.set_visible(False)
+            return
+        parts = [self.runtime.current_page().get("name") or "Page"]
+        for frame in self._edit_stack:
+            parts.append(frame.get("name") or "Submenu")
+        self._crumb_label.set_text(" › ".join(parts) + " (editing)")
+        self._crumb_bar.set_visible(True)
 
     def _commit(self) -> None:
         if self._suspend:
@@ -819,6 +937,10 @@ class MxPadWindow(Adw.ApplicationWindow):
             btn.set_active(i == self.runtime._page_index)
             btn.connect("clicked", lambda _b, idx=i: self._switch_page(idx))
             self._page_bar.append(btn)
+        rename = Gtk.Button.new_from_icon_name("document-edit-symbolic")
+        rename.set_tooltip_text("Rename this page")
+        rename.connect("clicked", self._rename_page)
+        self._page_bar.append(rename)
         add = Gtk.Button.new_from_icon_name("list-add-symbolic")
         add.set_tooltip_text("Add page")
         add.connect("clicked", self._add_page)
@@ -830,8 +952,7 @@ class MxPadWindow(Adw.ApplicationWindow):
         self._page_bar.append(remove)
 
     def _refresh_grid(self) -> None:
-        page = self.runtime.current_page()
-        keys = page.get("keys") or []
+        keys = self._editing_keys()
         snapshot = self.runtime.collector.snapshot()
         for i, tile in enumerate(self._tiles):
             key = keys[i] if i < len(keys) else empty_key(i)
@@ -858,7 +979,11 @@ class MxPadWindow(Adw.ApplicationWindow):
     def _load_inspector(self) -> None:
         self._suspend = True
         key = self._key()
-        action = key.get("action") or {"type": "none"}
+        self._hold_enable.set_active(isinstance(key.get("hold_action"), dict))
+        self._action_slot.set_visible(self._hold_enable.get_active())
+        if not self._hold_enable.get_active():
+            self._action_slot.set_selected(0)
+        action = self._action_dict()
         kind = action.get("type") or "none"
         self._label_row.set_text(key.get("label") or "")
         icon_name = key.get("icon") or ""
@@ -901,12 +1026,30 @@ class MxPadWindow(Adw.ApplicationWindow):
         if kind == "page":
             pidx = next((i for i, (k, _) in enumerate(PAGE_WHICH) if k == action.get("which")), 1)
             self._page_row.set_selected(pidx)
+            self._fill_page_targets(action)
         if kind == "homeassistant":
             self._ha_label.set_text(action.get("entity_id") or "None")
-            hidx = next((i for i, (k, _) in enumerate(HA_SERVICES) if k == action.get("service")), 0)
-            self._ha_service_row.set_selected(hidx)
+            self._fill_ha_services(action.get("entity_id") or "", action.get("service"))
+        if kind == "submenu":
+            ensure_submenu(key, key.get("label"))
         self._show_action_rows(kind)
+        self._refresh_crumb()
         self._suspend = False
+
+    def _ha_service_options(self, entity_id: str) -> list[tuple[str, str]]:
+        options = services_for_entity(entity_id)
+        return options or list(HA_SERVICES)
+
+    def _fill_ha_services(self, entity_id: str, selected: str | None = None) -> None:
+        options = self._ha_service_options(entity_id)
+        labels = [label for _id, label in options]
+        self._ha_service_row.set_model(Gtk.StringList.new(labels or ["Toggle"]))
+        if not options:
+            self._ha_service_row.set_selected(0)
+            return
+        wanted = selected or default_service(entity_id)
+        hidx = next((i for i, (svc, _) in enumerate(options) if svc == wanted), 0)
+        self._ha_service_row.set_selected(hidx)
 
     def _show_action_rows(self, kind: str) -> None:
         mapping = {
@@ -917,17 +1060,87 @@ class MxPadWindow(Adw.ApplicationWindow):
             "command": {self._cmd_row},
             "media": {self._media_row},
             "system": {self._system_row},
-            "page": {self._page_row},
+            "page": {self._page_row, self._page_target_row},
+            "submenu": {self._submenu_row},
             "homeassistant": {self._ha_row, self._ha_service_row},
         }
         visible = mapping.get(kind, set())
+        if kind == "page":
+            which = PAGE_WHICH[self._page_row.get_selected()][0] if self._page_row.get_selected() >= 0 else "next"
+            if which != "goto":
+                visible = {self._page_row}
         for row in self._extra_rows:
             row.set_visible(row in visible)
+
+    def _fill_page_targets(self, action: dict[str, Any] | None = None) -> None:
+        pages = self.runtime.current_profile().get("pages") or []
+        labels = [str(p.get("name") or f"Page {i+1}") for i, p in enumerate(pages)]
+        self._page_target_row.set_model(Gtk.StringList.new(labels or ["Page 1"]))
+        action = action or self._action_dict()
+        idx = 0
+        page_id = action.get("page_id")
+        if page_id:
+            for i, page in enumerate(pages):
+                if page.get("id") == page_id:
+                    idx = i
+                    break
+        elif action.get("index") is not None:
+            try:
+                idx = max(0, min(int(action["index"]), max(0, len(pages) - 1)))
+            except (TypeError, ValueError):
+                idx = 0
+        self._page_target_row.set_selected(idx)
 
     def _select_key(self, index: int) -> None:
         self._selected = index
         self._refresh_grid()
         self._load_inspector()
+
+    def _duplicate_key(self, *_args) -> None:
+        keys = self._editing_keys()
+        source = self._key()
+        src_idx = self._selected
+        dialog = Adw.AlertDialog(
+            heading="Duplicate key",
+            body="Choose which key slot to overwrite with a copy of this one.",
+        )
+        chooser = Gtk.ListBox()
+        chooser.add_css_class("boxed-list")
+        chooser.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        for i, key in enumerate(keys[:9]):
+            if i == src_idx:
+                continue
+            label = (key.get("label") or "").strip() or f"Key {i + 1}"
+            row = Adw.ActionRow(title=f"Slot {i + 1}", subtitle=label)
+            row.target_index = i
+            chooser.append(row)
+        dialog.set_extra_child(chooser)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("ok", "Duplicate")
+        dialog.set_default_response("ok")
+        dialog.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+
+        def done(dlg, task) -> None:
+            try:
+                response = dlg.choose_finish(task)
+            except GLib.Error:
+                return
+            if response != "ok":
+                return
+            row = chooser.get_selected_row()
+            if row is None:
+                self._on_status("Pick a target slot first")
+                return
+            target = int(row.target_index)
+            keys[target] = duplicate_key(source)
+            self._selected = target
+            self._commit()
+            self._refresh_grid()
+            self._load_inspector()
+            name = (source.get("label") or "").strip() or f"Key {src_idx + 1}"
+            self._on_status(f"Duplicated “{name}” to slot {target + 1}")
+
+        dialog.choose(self, None, done)
 
     def _label_changed(self, row: Adw.EntryRow) -> None:
         if self._suspend:
@@ -992,6 +1205,27 @@ class MxPadWindow(Adw.ApplicationWindow):
 
         EntityChooser(self, chosen, kind="status", on_close=self._load_inspector).present()
 
+    def _hold_enable_changed(self, *_args) -> None:
+        if self._suspend:
+            return
+        enabled = self._hold_enable.get_active()
+        self._action_slot.set_visible(enabled)
+        if not enabled:
+            self._key()["hold_action"] = None
+            self._action_slot.set_selected(0)
+        else:
+            hold = self._key().get("hold_action")
+            if not isinstance(hold, dict):
+                self._key()["hold_action"] = {"type": "none"}
+            self._action_slot.set_selected(1)
+        self._load_inspector()
+        self._commit()
+
+    def _action_slot_changed(self, *_args) -> None:
+        if self._suspend:
+            return
+        self._load_inspector()
+
     def _type_changed(self, *_args) -> None:
         if self._suspend:
             return
@@ -1013,10 +1247,13 @@ class MxPadWindow(Adw.ApplicationWindow):
             action["command"] = "screenshot"
         elif kind == "page":
             action["which"] = "next"
+        elif kind == "submenu":
+            ensure_submenu(self._key(), self._key().get("label"))
         elif kind == "homeassistant":
             action["entity_id"] = ""
             action["service"] = "toggle"
-        self._key()["action"] = action
+            self._fill_ha_services("", "toggle")
+        self._set_action(action)
         self._show_action_rows(kind)
         self._load_inspector()
         self._commit()
@@ -1025,13 +1262,13 @@ class MxPadWindow(Adw.ApplicationWindow):
         if self._suspend:
             return
         keys = [p.strip().lower() for p in row.get_text().replace(" ", "+").split("+") if p.strip()]
-        self._key()["action"] = {"type": "hotkey", "keys": keys}
+        self._set_action({"type": "hotkey", "keys": keys})
         self._commit()
 
     def _text_changed(self, row: Adw.EntryRow) -> None:
         if self._suspend:
             return
-        self._key()["action"] = {"type": "text", "text": row.get_text()}
+        self._set_action({"type": "text", "text": row.get_text()})
         self._commit()
 
     def _open_changed(self, row: Adw.EntryRow) -> None:
@@ -1039,35 +1276,84 @@ class MxPadWindow(Adw.ApplicationWindow):
             return
         text = row.get_text().strip()
         field = "url" if "://" in text else "path"
-        self._key()["action"] = {"type": "open", field: text}
+        self._set_action({"type": "open", field: text})
         self._commit()
 
     def _cmd_changed(self, row: Adw.EntryRow) -> None:
         if self._suspend:
             return
-        self._key()["action"] = {"type": "command", "command": row.get_text()}
+        self._set_action({"type": "command", "command": row.get_text()})
         self._commit()
 
     def _media_changed(self, *_args) -> None:
         if self._suspend:
             return
         cmd = MEDIA_COMMANDS[self._media_row.get_selected()][0]
-        self._key()["action"] = {"type": "media", "command": cmd}
+        self._set_action({"type": "media", "command": cmd})
         self._commit()
 
     def _system_changed(self, *_args) -> None:
         if self._suspend:
             return
         cmd = SYSTEM_COMMANDS[self._system_row.get_selected()][0]
-        self._key()["action"] = {"type": "system", "command": cmd}
+        self._set_action({"type": "system", "command": cmd})
         self._commit()
 
     def _page_action_changed(self, *_args) -> None:
         if self._suspend:
             return
         which = PAGE_WHICH[self._page_row.get_selected()][0]
-        self._key()["action"] = {"type": "page", "which": which}
+        action: dict[str, Any] = {"type": "page", "which": which}
+        if which == "goto":
+            self._fill_page_targets(action)
+            pages = self.runtime.current_profile().get("pages") or []
+            idx = max(0, self._page_target_row.get_selected())
+            if pages:
+                idx = min(idx, len(pages) - 1)
+                action["index"] = idx
+                action["page_id"] = pages[idx].get("id")
+        self._set_action(action)
+        self._show_action_rows("page")
         self._commit()
+
+    def _page_target_changed(self, *_args) -> None:
+        if self._suspend:
+            return
+        pages = self.runtime.current_profile().get("pages") or []
+        if not pages:
+            return
+        idx = max(0, min(self._page_target_row.get_selected(), len(pages) - 1))
+        self._set_action(
+            {
+                "type": "page",
+                "which": "goto",
+                "index": idx,
+                "page_id": pages[idx].get("id"),
+            }
+        )
+        self._page_row.set_selected(next(i for i, (k, _) in enumerate(PAGE_WHICH) if k == "goto"))
+        self._commit()
+
+    def _edit_submenu(self, *_args) -> None:
+        key = self._key()
+        sub = ensure_submenu(key, key.get("label"))
+        self._edit_stack.append({"name": sub.get("name") or key.get("label") or "Submenu", "keys": sub["keys"]})
+        self._selected = 0
+        self._refresh_crumb()
+        self._refresh_grid()
+        self._load_inspector()
+        self._on_status(f"Editing submenu “{sub.get('name') or 'Submenu'}”")
+
+    def _edit_submenu_done(self, *_args) -> None:
+        if not self._edit_stack:
+            return
+        self._edit_stack.pop()
+        self._selected = 0
+        self._refresh_crumb()
+        self._refresh_grid()
+        self._load_inspector()
+        self._commit()
+        self._on_status("Submenu saved")
 
     def _open_ha(self, *_args) -> None:
         HomeAssistantDialog(self, self._on_status).present()
@@ -1075,11 +1361,14 @@ class MxPadWindow(Adw.ApplicationWindow):
     def _ha_service_changed(self, *_args) -> None:
         if self._suspend:
             return
-        service = HA_SERVICES[self._ha_service_row.get_selected()][0]
-        action = dict(self._key().get("action") or {})
+        action = dict(self._action_dict())
+        options = self._ha_service_options(str(action.get("entity_id") or ""))
+        idx = self._ha_service_row.get_selected()
+        if not options or idx < 0 or idx >= len(options):
+            return
         action["type"] = "homeassistant"
-        action["service"] = service
-        self._key()["action"] = action
+        action["service"] = options[idx][0]
+        self._set_action(action)
         self._commit()
 
     def _pick_ha_entity(self, *_args) -> None:
@@ -1089,11 +1378,11 @@ class MxPadWindow(Adw.ApplicationWindow):
             return
 
         def chosen(ent: Entity) -> None:
-            action = dict(self._key().get("action") or {})
+            action = dict(self._action_dict())
             action["type"] = "homeassistant"
             action["entity_id"] = ent.entity_id
-            action.setdefault("service", "toggle")
-            self._key()["action"] = action
+            action["service"] = default_service(ent.entity_id)
+            self._set_action(action)
             self._key()["label"] = ent.name[:12]
             if not self._key().get("icon"):
                 self._key()["icon"] = ent.icon
@@ -1104,7 +1393,7 @@ class MxPadWindow(Adw.ApplicationWindow):
 
     def _pick_app(self, *_args) -> None:
         def chosen(ident: str, name: str) -> None:
-            self._key()["action"] = {"type": "launch", "id": ident}
+            self._set_action({"type": "launch", "id": ident})
             self._key()["label"] = name.split()[0][:10]
             self._commit()
             self._load_inspector()
@@ -1172,7 +1461,7 @@ class MxPadWindow(Adw.ApplicationWindow):
                 names.append(mapped)
             if len(names) == 0:
                 return True
-            self._key()["action"] = {"type": "hotkey", "keys": names}
+            self._set_action({"type": "hotkey", "keys": names})
             self._commit()
             self._load_inspector()
             self.remove_controller(ctl)
@@ -1184,9 +1473,11 @@ class MxPadWindow(Adw.ApplicationWindow):
     def _profile_selected(self, _list, row) -> None:
         if self._suspend or row is None:
             return
+        self._edit_stack.clear()
         self.runtime.set_profile(row.profile_id)
         self._page_index_sync()
         self._refresh_pages()
+        self._refresh_crumb()
         self._refresh_grid()
         self._load_inspector()
 
@@ -1194,20 +1485,53 @@ class MxPadWindow(Adw.ApplicationWindow):
         pass
 
     def _switch_page(self, index: int) -> None:
+        self._edit_stack.clear()
         self.runtime.set_page(index)
         self._refresh_pages()
+        self._refresh_crumb()
         self._refresh_grid()
         self._load_inspector()
 
     def _add_page(self, *_args) -> None:
+        self._edit_stack.clear()
         profile = self.runtime.current_profile()
         n = len(profile["pages"]) + 1
         profile["pages"].append(empty_page(f"Page {n}"))
         self.runtime.save()
         self.runtime.set_page(n - 1)
         self._refresh_pages()
+        self._refresh_crumb()
         self._refresh_grid()
         self._load_inspector()
+
+    def _rename_page(self, *_args) -> None:
+        page = self.runtime.current_page()
+        current = page.get("name") or "Page"
+        dialog = Adw.AlertDialog(heading="Rename page", body="Name shown on the page bar")
+        entry = Gtk.Entry()
+        entry.set_text(current)
+        entry.set_placeholder_text("Page name")
+        entry.select_region(0, -1)
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("ok", "Rename")
+        dialog.set_default_response("ok")
+        dialog.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+
+        def done(dlg, task) -> None:
+            try:
+                response = dlg.choose_finish(task)
+            except GLib.Error:
+                return
+            if response != "ok":
+                return
+            name = entry.get_text().strip() or current
+            page["name"] = name
+            self.runtime.save()
+            self._refresh_pages()
+            self._on_status(f"Page renamed to “{name}”")
+
+        dialog.choose(self, None, done)
 
     def _delete_page(self, *_args) -> None:
         pages = self.runtime.current_profile().get("pages") or []
@@ -1235,7 +1559,9 @@ class MxPadWindow(Adw.ApplicationWindow):
             if not self.runtime.delete_page():
                 self._on_status("A profile needs at least one page")
                 return
+            self._edit_stack.clear()
             self._refresh_pages()
+            self._refresh_crumb()
             self._refresh_grid()
             self._load_inspector()
             self._on_status(f"Deleted “{name}”")

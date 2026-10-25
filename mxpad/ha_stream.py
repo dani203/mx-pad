@@ -90,9 +90,16 @@ class HaHub:
             out[ent.status_key] = (ent.status_text(), ent.icon, color, text_color)
         return out
 
-    def call_service(self, domain: str, service: str, entity_id: str) -> bool:
+    def get_entity(self, entity_id: str):
+        with self._lock:
+            return self._states.get(entity_id)
+
+    def call_service(self, domain: str, service: str, data: dict[str, Any] | str) -> bool:
         self.ensure()
-        self._optimistic(entity_id, service)
+        if isinstance(data, str):
+            payload = {"entity_id": data}
+        else:
+            payload = dict(data)
         if not self._ready.is_set():
             return False
         try:
@@ -102,48 +109,42 @@ class HaHub:
                     "type": "call_service",
                     "domain": domain,
                     "service": service,
-                    "service_data": {"entity_id": entity_id},
+                    "service_data": payload,
                 }
             )
             return True
         except OSError:
             return False
 
-    def _optimistic(self, entity_id: str, service: str) -> None:
+    def apply_optimistic(self, entity_id: str, service: str, data: dict[str, Any] | None = None) -> None:
         with self._lock:
             ent = self._states.get(entity_id)
             if ent is None:
                 return
-            state = (ent.state or "").lower()
-            if service == "toggle":
-                if state in ("on", "open", "unlocked", "playing"):
-                    new = {"on": "off", "open": "closed", "unlocked": "locked", "playing": "paused"}.get(state, "off")
-                else:
-                    new = {"off": "on", "closed": "open", "locked": "unlocked", "paused": "playing"}.get(state, "on")
-            elif service in ("turn_on", "open_cover", "unlock", "press"):
-                new = "on" if service != "open_cover" else "open"
-                if service == "unlock":
-                    new = "unlocked"
-            elif service in ("turn_off", "close_cover", "lock"):
-                new = "off" if service != "close_cover" else "closed"
-                if service == "lock":
-                    new = "locked"
-            else:
-                return
-            from mxpad.homeassistant import Entity
+            from dataclasses import replace
 
-            updated = Entity(
-                ent.entity_id,
-                ent.name,
-                ent.domain,
-                new,
-                ent.unit,
-                ent.rgb,
-                ent.hs,
-                ent.kelvin,
-                0 if new in ("off", "closed") else ent.brightness,
-            )
-            self._states[entity_id] = updated
+            data = data or {}
+            updates: dict[str, Any] = {}
+            new_state = _optimistic_state(ent.domain, (ent.state or "").lower(), service)
+            if new_state is not None:
+                updates["state"] = new_state
+                if new_state in ("off", "closed", "idle", "docked"):
+                    updates["brightness"] = 0
+            if "brightness_step_pct" in data and ent.brightness is not None:
+                step = int(data["brightness_step_pct"])
+                updates["brightness"] = max(1, min(255, ent.brightness + round(255 * step / 100)))
+                updates["state"] = "on"
+            if "color_temp_kelvin" in data:
+                updates["kelvin"] = int(data["color_temp_kelvin"])
+                updates["state"] = "on"
+            if "temperature" in data:
+                updates["temperature"] = float(data["temperature"])
+            if "value" in data and ent.domain in ("number", "input_number"):
+                updates["number_value"] = float(data["value"])
+                updates["state"] = str(data["value"])
+            if not updates:
+                return
+            self._states[entity_id] = replace(ent, **updates)
         self._notify(entity_id)
 
     def _notify(self, entity_id: str | None) -> None:
@@ -267,6 +268,71 @@ class HaHub:
 
 
 hub = HaHub()
+
+
+def _optimistic_state(domain: str, state: str, service: str) -> str | None:
+    if service == "toggle":
+        if state in ("on", "open", "unlocked", "playing", "active"):
+            return {
+                "on": "off",
+                "open": "closed",
+                "unlocked": "locked",
+                "playing": "paused",
+                "active": "idle",
+            }.get(state, "off")
+        return {
+            "off": "on",
+            "closed": "open",
+            "locked": "unlocked",
+            "paused": "playing",
+            "idle": "active",
+        }.get(state, "on")
+
+    mapping = {
+        "turn_on": "on",
+        "turn_off": "off",
+        "press": state or "on",
+        "open_cover": "open",
+        "close_cover": "closed",
+        "stop_cover": state,
+        "open_valve": "open",
+        "close_valve": "closed",
+        "stop_valve": state,
+        "lock": "locked",
+        "unlock": "unlocked",
+        "open": "open",
+        "start": "cleaning" if domain == "vacuum" else "active",
+        "pause": "paused",
+        "stop": "idle" if domain == "timer" else "docked" if domain == "vacuum" else "off",
+        "cancel": "idle",
+        "finish": "idle",
+        "return_to_base": "returning",
+        "locate": state,
+        "clean_spot": "cleaning",
+        "start_mowing": "mowing",
+        "dock": "docked",
+        "media_play": "playing",
+        "media_pause": "paused",
+        "media_stop": "idle",
+        "media_play_pause": "paused" if state == "playing" else "playing",
+        "alarm_disarm": "disarmed",
+        "alarm_arm_home": "armed_home",
+        "alarm_arm_away": "armed_away",
+        "alarm_arm_night": "armed_night",
+        "trigger": state,
+        "increment": state,
+        "decrement": state,
+        "reset": state,
+        "brightness_up": "on",
+        "brightness_down": "on",
+        "color_temp_warmer": "on",
+        "color_temp_cooler": "on",
+        "temperature_up": state,
+        "temperature_down": state,
+        "open_cover_tilt": state,
+        "close_cover_tilt": state,
+    }
+    return mapping.get(service)
 
 
 def _connect(url: str, insecure: bool) -> socket.socket:

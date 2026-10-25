@@ -86,7 +86,10 @@ def render_key_image(key: dict) -> Image.Image:
     image_name = key.get("image")
     icon_name = key.get("icon")
     show_icon = _show_icon(key)
+    label = " ".join((key.get("label") or "").split())
     has_graphic = False
+    # No label → icon/image can use the full tile; otherwise sit above the text.
+    icon_only = not label
 
     if show_icon and image_name:
         path = Path(image_name)
@@ -94,25 +97,28 @@ def render_key_image(key: dict) -> Image.Image:
             path = IMAGE_DIR / image_name
         if path.is_file():
             overlay = Image.open(path).convert("RGBA")
-            overlay.thumbnail((KEY_SIZE - 20, 44), Image.Resampling.LANCZOS)
+            if icon_only:
+                overlay.thumbnail((KEY_SIZE - 12, KEY_SIZE - 12), Image.Resampling.LANCZOS)
+            else:
+                overlay.thumbnail((KEY_SIZE - 20, 44), Image.Resampling.LANCZOS)
             x = (KEY_SIZE - overlay.width) // 2
-            y = 4
+            y = (KEY_SIZE - overlay.height) // 2 if icon_only else 4
             base = img.convert("RGBA")
             base.alpha_composite(overlay, (x, y))
             img = base.convert("RGB")
             draw = ImageDraw.Draw(img)
             has_graphic = True
     elif show_icon and icon_name:
-        glyph_img = render_icon(icon_name, 40, text_color)
+        glyph_size = KEY_SIZE - 16 if icon_only else 40
+        glyph_img = render_icon(icon_name, glyph_size, text_color)
         base = img.convert("RGBA")
         x = (KEY_SIZE - glyph_img.width) // 2
-        y = 0
+        y = (KEY_SIZE - glyph_img.height) // 2 if icon_only else 0
         base.alpha_composite(glyph_img, (x, y))
         img = base.convert("RGB")
         draw = ImageDraw.Draw(img)
         has_graphic = True
 
-    label = " ".join((key.get("label") or "").split())
     if label:
         if has_graphic:
             font = _size_for(draw, label, KEY_SIZE - 8, 50, 36)

@@ -8,13 +8,14 @@ from gi.repository import GLib
 
 from mx_keypad import KEY_GAP, KEY_SIZE, GRID, ORIGIN_X, ORIGIN_Y, MXKeypad, encode_jpeg
 from mxpad.actions import ActionRunner
-from mxpad.config import default_nav, load_config, save_config
+from mxpad.config import default_nav, empty_submenu, load_config, save_config
 from mxpad.doom import KONAMI, DoomError, DoomSession
 from mxpad.focus import focused_app_name, profile_matches
 from mxpad.render import page_canvas, render_key, slide_canvas
 from mxpad.status import StatusCollector, apply_status
 
 PAGE_SLIDE_STEPS = 5
+HOLD_SECONDS = 0.45
 
 
 StatusFn = Callable[[str], None]
@@ -41,6 +42,9 @@ class PadRuntime:
         self._konami: list[int] = []
         self._doom: DoomSession | None = None
         self._live_paint_source: int | None = None
+        self._menu_stack: list[dict[str, Any]] = []
+        self._hold_pending: dict[int, dict[str, Any]] = {}
+        self._hold_fired: set[int] = set()
         from mxpad.ha_stream import hub
 
         hub.add_listener(self._on_ha)
@@ -118,9 +122,55 @@ class PadRuntime:
         self._page_index %= len(pages)
         return pages[self._page_index]
 
+    def current_keys(self) -> list[dict[str, Any]]:
+        if self._menu_stack:
+            return list(self._menu_stack[-1].get("keys") or [])
+        return list(self.current_page().get("keys") or [])
+
+    def clear_menu_stack(self) -> None:
+        if not self._menu_stack:
+            return
+        self._menu_stack.clear()
+        self._hold_pending.clear()
+        self._hold_fired.clear()
+        self._painted_sig = None
+        self._live_sigs = [""] * 9
+
+    def push_submenu(self, submenu: dict[str, Any] | None) -> None:
+        if not isinstance(submenu, dict):
+            return
+        keys = submenu.get("keys")
+        if not isinstance(keys, list) or not keys:
+            submenu = empty_submenu(str(submenu.get("name") or "Submenu"))
+        self._menu_stack.append(submenu)
+        self._hold_pending.clear()
+        self._hold_fired.clear()
+        self._painted_sig = None
+        self._live_sigs = [""] * 9
+        name = submenu.get("name") or "Submenu"
+        GLib.idle_add(lambda n=name: self.on_status(f"Submenu: {n}") or False)
+        self._paint_current(force=True)
+
+    def pop_submenu(self) -> bool:
+        if not self._menu_stack:
+            return False
+        self._menu_stack.pop()
+        self._hold_pending.clear()
+        self._hold_fired.clear()
+        self._painted_sig = None
+        self._live_sigs = [""] * 9
+        if self._menu_stack:
+            name = self._menu_stack[-1].get("name") or "Submenu"
+            GLib.idle_add(lambda n=name: self.on_status(f"Submenu: {n}") or False)
+        else:
+            GLib.idle_add(lambda: self.on_status("Back") or False)
+        self._paint_current(force=True)
+        return True
+
     def set_profile(self, profile_id: str) -> None:
         self.cfg["active_profile"] = profile_id
         self._page_index = 0
+        self.clear_menu_stack()
         self._painted_sig = None
         self._live_sigs = [""] * 9
         self._paint_current(force=True)
@@ -131,18 +181,19 @@ class PadRuntime:
         if not pages:
             return
         target = index % len(pages)
-        if target == self._page_index:
+        if target == self._page_index and not self._menu_stack:
             return
         old_index = self._page_index
         if direction is None:
             forward = (target - old_index) % len(pages)
             back = (old_index - target) % len(pages)
             direction = 1 if forward <= back else -1
-        old_keys = list((pages[old_index].get("keys") or [])[:9])
+        old_keys = list(self.current_keys()[:9]) if self._menu_stack else list((pages[old_index].get("keys") or [])[:9])
+        self.clear_menu_stack()
         self._page_index = target
         self._painted_sig = None
         self._live_sigs = [""] * 9
-        if self.cfg.get("page_animation", True):
+        if self.cfg.get("page_animation", True) and old_index != target:
             self._slide_pages(old_keys, direction)
         self._paint_current(force=True)
 
@@ -158,20 +209,28 @@ class PadRuntime:
             self._page_index = len(pages) - 1
         elif self._page_index > idx:
             self._page_index -= 1
+        self.clear_menu_stack()
         self._painted_sig = None
         self._live_sigs = [""] * 9
         save_config(self.cfg)
         self._paint_current(force=True)
         return True
 
-    def _handle_page(self, which: str, index: int | None) -> None:
+    def _handle_page(self, which: str, index: int | None = None, page_id: str | None = None) -> None:
         pages = self.current_profile().get("pages") or []
         n = len(pages)
         if n == 0:
             return
-        if which == "goto" and index is not None:
-            self.set_page(index)
-        elif which == "prev":
+        if which == "goto":
+            if page_id:
+                for i, page in enumerate(pages):
+                    if page.get("id") == page_id:
+                        self.set_page(i)
+                        return
+            if index is not None:
+                self.set_page(int(index))
+            return
+        if which == "prev":
             self.set_page((self._page_index - 1) % n, direction=-1)
         else:
             self.set_page((self._page_index + 1) % n, direction=1)
@@ -243,11 +302,13 @@ class PadRuntime:
             page = self.current_page()
         except Exception:
             return
-        sig = f"{self.current_profile()['id']}:{page.get('id')}:{self._page_index}"
+        menu_depth = len(self._menu_stack)
+        menu_name = self._menu_stack[-1].get("name") if self._menu_stack else ""
+        sig = f"{self.current_profile()['id']}:{page.get('id')}:{self._page_index}:{menu_depth}:{menu_name}"
         if force or sig != self._painted_sig:
             self._live_sigs = [""] * 9
         snapshot = self.collector.snapshot()
-        keys = page.get("keys") or []
+        keys = self.current_keys()
         with self._lock:
             pad = self.pad
             if not pad:
@@ -279,6 +340,7 @@ class PadRuntime:
                 if self.cfg.get("active_profile") != profile["id"]:
                     self.cfg["active_profile"] = profile["id"]
                     self._page_index = 0
+                    self.clear_menu_stack()
                     self._painted_sig = None
                     save_config(self.cfg)
                     GLib.idle_add(
@@ -316,6 +378,10 @@ class PadRuntime:
                 except Exception:
                     pass
                 last_adapt = now
+            try:
+                self._check_holds()
+            except Exception as exc:
+                GLib.idle_add(lambda e=str(exc): self.on_status(f"Action failed: {e}") or False)
             if self._doom:
                 try:
                     with self._lock:
@@ -335,7 +401,7 @@ class PadRuntime:
                 last_live = now
             try:
                 with self._lock:
-                    timeout = 0.02 if self._doom else 0.15
+                    timeout = 0.02 if self._doom or self._hold_pending else 0.15
                     events = self.pad.read_events(timeout) if self.pad else []
             except OSError:
                 self._disconnect("Keypad disconnected")
@@ -348,6 +414,42 @@ class PadRuntime:
                 except Exception as exc:
                     GLib.idle_add(lambda e=str(exc): self.on_status(f"Action failed: {e}") or False)
 
+    def _has_hold(self, key: dict[str, Any]) -> bool:
+        hold = key.get("hold_action")
+        if not isinstance(hold, dict):
+            return False
+        kind = hold.get("type")
+        return bool(kind and kind not in ("none", ""))
+
+    def _check_holds(self) -> None:
+        now = time.monotonic()
+        due = [idx for idx, pending in self._hold_pending.items() if now >= pending["deadline"]]
+        for idx in due:
+            pending = self._hold_pending.pop(idx, None)
+            if not pending:
+                continue
+            self._hold_fired.add(idx)
+            self._activate_key(pending["key"], pending["hold"])
+
+    def _activate_key(self, key: dict[str, Any], action: dict[str, Any] | None = None) -> None:
+        action = action if action is not None else (key.get("action") or {"type": "none"})
+        if not isinstance(action, dict):
+            return
+        kind = action.get("type") or "none"
+        if kind == "submenu":
+            sub = key.get("submenu")
+            if not isinstance(sub, dict):
+                sub = empty_submenu(str(key.get("label") or "Submenu"))
+                key["submenu"] = sub
+            self.push_submenu(sub)
+            return
+        if kind == "back":
+            self.pop_submenu()
+            return
+        if kind in ("none", ""):
+            return
+        self.runner.run(action)
+
     def _dispatch(self, event: Any) -> None:
         if self._doom:
             if event.key == "P1" and event.pressed:
@@ -359,24 +461,46 @@ class PadRuntime:
         if event.key in ("P1", "P2"):
             if not event.pressed:
                 return
-            profile = self.current_profile()
-            action = self._nav_action(event.key)
-            self.runner.run(action)
+            if event.key == "P1" and self._menu_stack:
+                self.pop_submenu()
+                return
+            if self._menu_stack:
+                return
+            self.runner.run(self._nav_action(event.key))
             return
-        if not event.pressed or event.index is None:
+        if event.index is None:
             return
-        self._konami.append(event.index)
-        self._konami = self._konami[-len(KONAMI) :]
-        if tuple(self._konami) == KONAMI:
-            self._konami.clear()
-            self._start_doom()
+        idx = event.index
+        keys = self.current_keys()
+        if idx >= len(keys):
             return
-        page = self.current_page()
-        keys = page.get("keys") or []
-        if event.index >= len(keys):
+        key = keys[idx]
+
+        if event.pressed:
+            self._konami.append(idx)
+            self._konami = self._konami[-len(KONAMI) :]
+            if tuple(self._konami) == KONAMI and not self._menu_stack:
+                self._konami.clear()
+                self._start_doom()
+                return
+            if self._has_hold(key):
+                self._hold_pending[idx] = {
+                    "deadline": time.monotonic() + HOLD_SECONDS,
+                    "key": key,
+                    "hold": key.get("hold_action") or {"type": "none"},
+                }
+                self._hold_fired.discard(idx)
+                return
+            self._activate_key(key)
             return
-        action = keys[event.index].get("action") or {"type": "none"}
-        self.runner.run(action)
+
+        # Release
+        pending = self._hold_pending.pop(idx, None)
+        if idx in self._hold_fired:
+            self._hold_fired.discard(idx)
+            return
+        if pending:
+            self._activate_key(key, key.get("action") or {"type": "none"})
 
     def _start_doom(self) -> None:
         if self._doom:

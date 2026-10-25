@@ -39,8 +39,9 @@ Toolbar **Home Assistant**: discover `_home-assistant._tcp` on the LAN (Avahi)
 or paste a URL such as `http://homeassistant.local:8123`. **Sign in with Home
 Assistant** opens your browser on HA’s own login (OAuth). A long-lived access
 token (HA profile → Security) still works as a fallback. Then set a key’s
-action to Home Assistant and pick an entity (lights, switches, covers, scenes,
-…). Pressing the key calls `toggle` / `turn_on` / `turn_off` on that entity.
+action to Home Assistant and pick an entity (lights, locks, timers, vacuums,
+covers, media players, …). The command list only shows services that fit that
+entity (lock/unlock, brightness up/down, warmer/cooler, climate ±°, and so on).
 **Live status → Home Assistant** paints a sensor, light, or other entity’s
 current state on the LCD (Home Assistant websocket, no REST polling). **Color from status**
 tints the key from on/off, RGB, and color temperature when the entity is a
@@ -57,9 +58,11 @@ light or switch.
 | Run command | Custom / Smart Action |
 | Media playback | Play, next, mute, volume |
 | System / settings | Screenshot, lock, night light, brightness, desktop |
-| Go to page | Navigate to page |
+| Switch to page | Jump to a named page (or previous / next) |
+| Submenu | Temporary 9-key overlay; P1 or Back leaves it |
+| Hold action | Optional long-press action on the same key |
 | Home Assistant | Toggle lights, switches, scenes, and other entities |
-| P1 / P2 | Page previous / next (click P1/P2 in the UI to flip) |
+| P1 / P2 | Page previous / next (P1 closes a submenu) |
 | MDI icon | Material Design Icons on the LCD (Browse in the key editor) |
 
 Pages sit under each profile (Media, Apps, Keys, **Status** out of the box). Extra profiles

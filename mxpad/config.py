@@ -152,7 +152,34 @@ def empty_key(index: int) -> dict[str, Any]:
         "status": None,
         "show_icon": True,
         "action": {"type": "none"},
+        "hold_action": None,
+        "submenu": None,
     }
+
+
+def empty_submenu(name: str = "Submenu") -> dict[str, Any]:
+    return {
+        "name": name,
+        "keys": [empty_key(i) for i in range(9)],
+    }
+
+
+def ensure_submenu(key: dict[str, Any], name: str | None = None) -> dict[str, Any]:
+    sub = key.get("submenu")
+    if isinstance(sub, dict) and isinstance(sub.get("keys"), list):
+        while len(sub["keys"]) < 9:
+            sub["keys"].append(empty_key(len(sub["keys"])))
+        if name and not sub.get("name"):
+            sub["name"] = name
+        return sub
+    sub = empty_submenu(name or key.get("label") or "Submenu")
+    key["submenu"] = sub
+    return sub
+
+
+def duplicate_key(src: dict[str, Any]) -> dict[str, Any]:
+    """Deep-copy a key binding (including hold action and nested submenu)."""
+    return deepcopy(src)
 
 
 def duplicate_profile(src: dict[str, Any], name: str) -> dict[str, Any]:
