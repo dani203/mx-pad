@@ -10,6 +10,7 @@ bundle Options+ or vendor plugins (Photoshop etc. still work via keyboard
 shortcuts).
 
 <img width="1077" height="1221" alt="image" src="https://github.com/user-attachments/assets/65056e45-1516-4f18-b7fc-a6478ccc3afc" />
+<img width="1280" height="1700" alt="image" src="https://github.com/user-attachments/assets/ebca3417-2d23-455d-b22f-7455af4ad1b9" />
 
 
 
