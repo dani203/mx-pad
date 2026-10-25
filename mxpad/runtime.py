@@ -6,13 +6,15 @@ from typing import Any, Callable
 
 from gi.repository import GLib
 
-from mx_keypad import MXKeypad
+from mx_keypad import KEY_GAP, KEY_SIZE, GRID, ORIGIN_X, ORIGIN_Y, MXKeypad, encode_jpeg
 from mxpad.actions import ActionRunner
-from mxpad.config import load_config, save_config
+from mxpad.config import default_nav, load_config, save_config
 from mxpad.doom import KONAMI, DoomError, DoomSession
 from mxpad.focus import focused_app_name, profile_matches
-from mxpad.render import render_key
+from mxpad.render import page_canvas, render_key, slide_canvas
 from mxpad.status import StatusCollector, apply_status
+
+PAGE_SLIDE_STEPS = 5
 
 
 StatusFn = Callable[[str], None]
@@ -38,9 +40,18 @@ class PadRuntime:
         self._live_sigs: list[str] = [""] * 9
         self._konami: list[int] = []
         self._doom: DoomSession | None = None
+        self._live_paint_source: int | None = None
+        from mxpad.ha_stream import hub
+
+        hub.add_listener(self._on_ha)
 
     def start(self) -> None:
         self._stop.clear()
+        from mxpad.ha_stream import hub
+        from mxpad.homeassistant import is_configured
+
+        if is_configured():
+            hub.ensure()
         self._thread = threading.Thread(target=self._loop, name="mxpad-hid", daemon=True)
         self._thread.start()
 
@@ -63,6 +74,24 @@ class PadRuntime:
         save_config(self.cfg)
         self._painted_sig = None
         self._schedule_paint()
+
+    def _on_ha(self, _entity_id: str | None) -> None:
+        GLib.idle_add(self._schedule_live_paint)
+
+    def _schedule_live_paint(self) -> bool:
+        if self._live_paint_source:
+            return False
+        self._live_paint_source = GLib.timeout_add(50, self._live_paint_timeout)
+        return False
+
+    def _live_paint_timeout(self) -> bool:
+        self._live_paint_source = None
+        if not self._doom:
+            try:
+                self._paint_current()
+            except Exception:
+                pass
+        return False
 
     def _schedule_paint(self) -> None:
         if self._paint_source:
@@ -97,14 +126,43 @@ class PadRuntime:
         self._paint_current(force=True)
         save_config(self.cfg)
 
-    def set_page(self, index: int) -> None:
+    def set_page(self, index: int, direction: int | None = None) -> None:
         pages = self.current_profile().get("pages") or []
         if not pages:
             return
-        self._page_index = index % len(pages)
+        target = index % len(pages)
+        if target == self._page_index:
+            return
+        old_index = self._page_index
+        if direction is None:
+            forward = (target - old_index) % len(pages)
+            back = (old_index - target) % len(pages)
+            direction = 1 if forward <= back else -1
+        old_keys = list((pages[old_index].get("keys") or [])[:9])
+        self._page_index = target
         self._painted_sig = None
         self._live_sigs = [""] * 9
+        if self.cfg.get("page_animation", True):
+            self._slide_pages(old_keys, direction)
         self._paint_current(force=True)
+
+    def delete_page(self, index: int | None = None) -> bool:
+        profile = self.current_profile()
+        pages = profile.get("pages") or []
+        if len(pages) <= 1:
+            return False
+        idx = self._page_index if index is None else index
+        idx = max(0, min(idx, len(pages) - 1))
+        del pages[idx]
+        if self._page_index >= len(pages):
+            self._page_index = len(pages) - 1
+        elif self._page_index > idx:
+            self._page_index -= 1
+        self._painted_sig = None
+        self._live_sigs = [""] * 9
+        save_config(self.cfg)
+        self._paint_current(force=True)
+        return True
 
     def _handle_page(self, which: str, index: int | None) -> None:
         pages = self.current_profile().get("pages") or []
@@ -114,9 +172,49 @@ class PadRuntime:
         if which == "goto" and index is not None:
             self.set_page(index)
         elif which == "prev":
-            self.set_page((self._page_index - 1) % n)
+            self.set_page((self._page_index - 1) % n, direction=-1)
         else:
-            self.set_page((self._page_index + 1) % n)
+            self.set_page((self._page_index + 1) % n, direction=1)
+
+    def _nav_action(self, key: str) -> dict[str, Any]:
+        nav = self.current_profile().get("nav") or {}
+        action = nav.get(key)
+        if isinstance(action, dict) and action.get("type"):
+            return action
+        return default_nav()[key]
+
+    def _slide_pages(self, old_keys: list[dict[str, Any]], direction: int) -> None:
+        try:
+            snapshot = self.collector.snapshot()
+            outgoing = [apply_status(key, snapshot) for key in old_keys]
+            incoming = [apply_status(key, snapshot) for key in (self.current_page().get("keys") or [])[:9]]
+            while len(outgoing) < 9:
+                outgoing.append({"label": "", "color": "#111111"})
+            while len(incoming) < 9:
+                incoming.append({"label": "", "color": "#111111"})
+            old_img = page_canvas(outgoing)
+            new_img = page_canvas(incoming)
+            width = GRID * KEY_SIZE + (GRID - 1) * KEY_GAP
+            with self._lock:
+                pad = self.pad
+                if not pad:
+                    return
+                old_gap = pad.lcd_gap
+                pad.lcd_gap = 0.0
+                try:
+                    for step in range(1, PAGE_SLIDE_STEPS + 1):
+                        frame = slide_canvas(old_img, new_img, step / PAGE_SLIDE_STEPS, direction)
+                        pad.set_lcd_region(
+                            encode_jpeg(frame, quality=55),
+                            ORIGIN_X,
+                            ORIGIN_Y,
+                            width,
+                            width,
+                        )
+                finally:
+                    pad.lcd_gap = old_gap
+        except Exception:
+            return
 
     def _connect(self) -> None:
         with self._lock:
@@ -156,7 +254,10 @@ class PadRuntime:
                 return
             for i, key in enumerate(keys[:9]):
                 painted = apply_status(key, snapshot)
-                digest = f"{painted.get('label')}|{painted.get('icon')}|{painted.get('color')}|{painted.get('image')}|{painted.get('show_icon', True)}"
+                digest = (
+                    f"{painted.get('label')}|{painted.get('icon')}|{painted.get('color')}|"
+                    f"{painted.get('text_color')}|{painted.get('image')}|{painted.get('show_icon', True)}"
+                )
                 if not force and self._live_sigs[i] == digest:
                     continue
                 try:
@@ -259,7 +360,7 @@ class PadRuntime:
             if not event.pressed:
                 return
             profile = self.current_profile()
-            action = (profile.get("nav") or {}).get(event.key) or {"type": "page", "which": "next"}
+            action = self._nav_action(event.key)
             self.runner.run(action)
             return
         if not event.pressed or event.index is None:

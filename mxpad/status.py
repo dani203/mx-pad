@@ -26,6 +26,7 @@ METRICS = [
     ("load", "Load average"),
     ("brightness", "Display brightness"),
     ("media", "Now playing"),
+    ("homeassistant", "Home Assistant"),
 ]
 
 
@@ -33,6 +34,8 @@ METRICS = [
 class Reading:
     text: str
     icon: str | None = None
+    color: str | None = None
+    text_color: str | None = None
 
 
 def apply_status(key: dict, snapshot: dict[str, Reading]) -> dict:
@@ -46,6 +49,11 @@ def apply_status(key: dict, snapshot: dict[str, Reading]) -> dict:
     painted["label"] = reading.text
     if reading.icon:
         painted["icon"] = reading.icon
+    if key.get("status_color"):
+        if reading.color:
+            painted["color"] = reading.color
+        if reading.text_color:
+            painted["text_color"] = reading.text_color
     return painted
 
 
@@ -54,9 +62,10 @@ class StatusCollector:
         self._cpu_idle = 0.0
         self._cpu_total = 0.0
         self._cache: dict[str, tuple[float, Reading]] = {}
+        self._ha_map: dict[str, Reading] = {}
 
     def snapshot(self) -> dict[str, Reading]:
-        return {
+        data = {
             "time": self._time(),
             "date": self._date(),
             "weekday": self._weekday(),
@@ -74,6 +83,23 @@ class StatusCollector:
             "brightness": self._cached("brightness", 2, self._brightness),
             "media": self._cached("media", 3, self._media),
         }
+        data.update(self._ha_readings())
+        return data
+
+    def _ha_readings(self) -> dict[str, Reading]:
+        from mxpad.homeassistant import is_configured
+        from mxpad.ha_stream import hub
+
+        if not is_configured():
+            return {}
+        hub.ensure()
+        latest = hub.readings()
+        if latest:
+            self._ha_map = {
+                key: Reading(text, icon, color, text_color)
+                for key, (text, icon, color, text_color) in latest.items()
+            }
+        return self._ha_map
 
     def _cached(self, key: str, ttl: float, fn) -> Reading:
         now = time.monotonic()

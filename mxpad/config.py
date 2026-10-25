@@ -45,11 +45,35 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
     if "profiles" not in data:
         return base
     data.setdefault("adapt_to_app", True)
+    data.setdefault("page_animation", True)
     data.setdefault("active_profile", data["profiles"][0]["id"])
     _fill_missing_icons(data, base)
     _ensure_status_page(data)
     _migrate_show_icon(data)
+    _ensure_nav(data)
     return data
+
+
+def default_nav() -> dict[str, Any]:
+    return {
+        "P1": {"type": "page", "which": "prev"},
+        "P2": {"type": "page", "which": "next"},
+    }
+
+
+def _ensure_nav(data: dict[str, Any]) -> None:
+    for profile in data.get("profiles") or []:
+        nav = profile.setdefault("nav", {})
+        defaults = default_nav()
+        for key, action in defaults.items():
+            if key not in nav or not isinstance(nav.get(key), dict):
+                nav[key] = dict(action)
+        # Both buttons defaulted to "next" in older builds.
+        p1 = nav.get("P1") or {}
+        p2 = nav.get("P2") or {}
+        if p1.get("type") == "page" and p2.get("type") == "page":
+            if p1.get("which") == "next" and p2.get("which") == "next":
+                nav["P1"] = {"type": "page", "which": "prev"}
 
 
 def _migrate_show_icon(data: dict[str, Any]) -> None:
@@ -105,10 +129,7 @@ def new_profile(name: str, match: dict[str, Any] | None = None) -> dict[str, Any
         "id": str(uuid.uuid4())[:8],
         "name": name,
         "match": match,
-        "nav": {
-            "P1": {"type": "page", "which": "prev"},
-            "P2": {"type": "page", "which": "next"},
-        },
+        "nav": default_nav(),
         "pages": [empty_page("Page 1")],
     }
 

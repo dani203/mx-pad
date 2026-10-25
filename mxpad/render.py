@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from mx_keypad import KEY_SIZE, encode_jpeg
+from mx_keypad import GRID, KEY_GAP, KEY_SIZE, encode_jpeg
 from mxpad.config import IMAGE_DIR
 from mxpad.mdi import render_icon
 
@@ -77,7 +77,7 @@ def _size_for(draw: ImageDraw.ImageDraw, text: str, max_w: int, max_h: int, hi: 
     return best
 
 
-def render_key(key: dict) -> bytes:
+def render_key_image(key: dict) -> Image.Image:
     color = _hex_rgb(key.get("color") or "#2b303b")
     text_color = _hex_rgb(key.get("text_color") or "#ffffff")
     img = Image.new("RGB", (KEY_SIZE, KEY_SIZE), color)
@@ -136,4 +136,34 @@ def render_key(key: dict) -> bytes:
                 stroke_width=2,
                 stroke_fill=(0, 0, 0),
             )
-    return encode_jpeg(img, quality=90)
+    return img
+
+
+def render_key(key: dict) -> bytes:
+    return encode_jpeg(render_key_image(key), quality=90)
+
+
+def page_canvas(keys: list[dict]) -> Image.Image:
+    width = GRID * KEY_SIZE + (GRID - 1) * KEY_GAP
+    canvas = Image.new("RGB", (width, width), (12, 12, 16))
+    for index, key in enumerate(keys[:9]):
+        row, col = divmod(index, GRID)
+        canvas.paste(
+            render_key_image(key),
+            (col * (KEY_SIZE + KEY_GAP), row * (KEY_SIZE + KEY_GAP)),
+        )
+    return canvas
+
+
+def slide_canvas(old: Image.Image, new: Image.Image, progress: float, direction: int) -> Image.Image:
+    """progress 0..1; direction >0 is forward (content moves left)."""
+    width, height = old.size
+    offset = max(0, min(width, int(round(progress * width))))
+    frame = Image.new("RGB", (width, height))
+    if direction >= 0:
+        frame.paste(old, (-offset, 0))
+        frame.paste(new, (width - offset, 0))
+    else:
+        frame.paste(old, (offset, 0))
+        frame.paste(new, (offset - width, 0))
+    return frame
